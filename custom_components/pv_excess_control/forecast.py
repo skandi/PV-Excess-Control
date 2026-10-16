@@ -88,7 +88,9 @@ def _duration(value: Any, default: timedelta) -> timedelta:
 
 class ForecastProvider(ABC):
     @abstractmethod
-    def get_forecast(self, states: dict[str, dict]) -> ForecastData:
+    def get_forecast(
+        self, states: dict[str, dict], *, now: datetime | None = None
+    ) -> ForecastData:
         """Return complete forecast data or raise ValueError for missing input."""
 
 
@@ -98,13 +100,17 @@ class GenericForecastProvider(ForecastProvider):
     def __init__(self, forecast_entity: str) -> None:
         self.forecast_entity = forecast_entity
 
-    def get_forecast(self, states: dict[str, dict]) -> ForecastData:
+    def get_forecast(
+        self, states: dict[str, dict], *, now: datetime | None = None
+    ) -> ForecastData:
         total, _ = _source(states, self.forecast_entity)
         return ForecastData(remaining_today_kwh=total)
 
 
 class SolcastProvider(GenericForecastProvider):
-    def get_forecast(self, states: dict[str, dict]) -> ForecastData:
+    def get_forecast(
+        self, states: dict[str, dict], *, now: datetime | None = None
+    ) -> ForecastData:
         total, attrs = _source(states, self.forecast_entity)
         key = next(
             (
@@ -191,6 +197,78 @@ class ForecastSolarProvider(GenericForecastProvider):
         return rows
 
 
+class HeliosForecastProvider(ForecastProvider):
+    """Read Helios Forecast power_now 15-min watt buckets."""
+
+    def __init__(self, forecast_entity: str) -> None:
+        self.forecast_entity = forecast_entity
+
+    def get_forecast(
+        self, states: dict[str, dict], *, now: datetime | None = None
+    ) -> ForecastData:
+        total, attrs = _source(states, self.forecast_entity)
+        raw = attrs.get("forecast") if isinstance(attrs, dict) else None
+        if not isinstance(raw, list) or not raw:
+            raise ValueError(f"Forecast unavailable: {self.forecast_entity}")
+
+        parsed: list[tuple[datetime, float]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            start = _parse_iso(
+                item.get("datetime")
+                or item.get("period_start")
+                or item.get("start")
+                or item.get("time")
+            )
+            watts = _parse_float(
+                item.get("watts")
+                if "watts" in item
+                else item.get("value")
+                if "value" in item
+                else item.get("pv_estimate")
+            )
+            if start is None or watts is None:
+                continue
+            parsed.append((start, watts))
+
+        if not parsed:
+            raise ValueError(f"Forecast unavailable: {self.forecast_entity}")
+
+        parsed.sort(key=lambda x: x[0])
+        diffs = [
+            (parsed[i + 1][0] - parsed[i][0]).total_seconds()
+            for i in range(len(parsed) - 1)
+            if (parsed[i + 1][0] - parsed[i][0]).total_seconds() > 0
+        ]
+        duration_seconds = min(diffs) if diffs else 15 * 60
+        if duration_seconds <= 0:
+            duration_seconds = 15 * 60
+        duration = timedelta(seconds=duration_seconds)
+
+        rows = []
+        for start, watts in parsed:
+            rows.append(_interval(start, start + duration, watts))
+        combined = _combine([rows])
+
+        resolved_now = now or datetime.now(timezone.utc)
+        now_utc = (
+            resolved_now
+            if resolved_now.tzinfo is not None
+            else resolved_now.replace(tzinfo=timezone.utc)
+        ).astimezone(timezone.utc)
+        remaining = sum(r.expected_kwh for r in combined if r.start >= now_utc)
+
+        tomorrow_date = now_utc.date() + timedelta(days=1)
+        tomorrow_total = sum(
+            r.expected_kwh for r in combined
+            if r.start.astimezone(timezone.utc).date() == tomorrow_date
+        )
+        tomorrow_total = tomorrow_total if tomorrow_total > 0 else None
+
+        return ForecastData(remaining, combined, tomorrow_total)
+
+
 class AggregatingForecastProvider(ForecastProvider):
     """Aggregate separate array entities; explicit tomorrow feeds replace that day."""
 
@@ -213,11 +291,7 @@ class AggregatingForecastProvider(ForecastProvider):
 
         def read(entity):
             provider = create_forecast_provider(self.provider_type, entity)
-            return (
-                provider.get_forecast(states, now=now)
-                if isinstance(provider, ForecastSolarProvider)
-                else provider.get_forecast(states)
-            )
+            return provider.get_forecast(states, now=now)
 
         if not self.entities:
             raise ValueError("Forecast unavailable: no sources configured")
@@ -273,6 +347,7 @@ def create_forecast_provider(
         "generic": GenericForecastProvider,
         "solcast": SolcastProvider,
         "forecast_solar": ForecastSolarProvider,
+        "helios_forecast": HeliosForecastProvider,
     }
     if provider_type not in mapping:
         raise ValueError(f"Unknown forecast provider type: {provider_type!r}")

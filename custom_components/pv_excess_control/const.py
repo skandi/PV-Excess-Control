@@ -83,6 +83,7 @@ class ForecastProvider(StrEnum):
     NONE = "none"
     SOLCAST = "solcast"
     FORECAST_SOLAR = "forecast_solar"
+    HELIOS_FORECAST = "helios_forecast"
     GENERIC = "generic"
 
 

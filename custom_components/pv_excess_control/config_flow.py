@@ -177,6 +177,7 @@ FORECAST_PROVIDER_OPTIONS = [
     {"value": ForecastProvider.NONE, "label": "None"},
     {"value": ForecastProvider.SOLCAST, "label": "Solcast"},
     {"value": ForecastProvider.FORECAST_SOLAR, "label": "Forecast.Solar"},
+    {"value": ForecastProvider.HELIOS_FORECAST, "label": "Helios"},
     {"value": ForecastProvider.GENERIC, "label": "Generic (sensor)"},
 ]
 
