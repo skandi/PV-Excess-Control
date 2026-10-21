@@ -252,19 +252,35 @@ class HeliosForecastProvider(ForecastProvider):
         combined = _combine([rows])
 
         resolved_now = now or datetime.now(timezone.utc)
-        now_utc = (
-            resolved_now
-            if resolved_now.tzinfo is not None
-            else resolved_now.replace(tzinfo=timezone.utc)
-        ).astimezone(timezone.utc)
-        remaining = sum(r.expected_kwh for r in combined if r.start >= now_utc)
+        if resolved_now.tzinfo is None:
+            resolved_now = resolved_now.replace(tzinfo=timezone.utc)
+        now_utc = resolved_now.astimezone(timezone.utc)
 
-        tomorrow_date = now_utc.date() + timedelta(days=1)
-        tomorrow_total = sum(
-            r.expected_kwh for r in combined
-            if r.start.astimezone(timezone.utc).date() == tomorrow_date
+        # The coordinator supplies HA-local now. Construct calendar boundaries
+        # locally, then integrate in UTC so DST days retain their actual length.
+        tomorrow_date = resolved_now.date() + timedelta(days=1)
+        tomorrow_start = datetime.combine(
+            tomorrow_date, datetime.min.time(), resolved_now.tzinfo
+        ).astimezone(timezone.utc)
+        tomorrow_end = datetime.combine(
+            tomorrow_date + timedelta(days=1), datetime.min.time(), resolved_now.tzinfo
+        ).astimezone(timezone.utc)
+
+        def energy_between(start: datetime, end: datetime) -> float:
+            return sum(
+                row.expected_watts
+                * (min(row.end, end) - max(row.start, start)).total_seconds()
+                / 3600000
+                for row in combined
+                if row.start < end and row.end > start
+            )
+
+        remaining = energy_between(now_utc, tomorrow_start)
+        tomorrow_total = (
+            energy_between(tomorrow_start, tomorrow_end)
+            if any(row.start < tomorrow_end and row.end > tomorrow_start for row in combined)
+            else None
         )
-        tomorrow_total = tomorrow_total if tomorrow_total > 0 else None
 
         return ForecastData(remaining, combined, tomorrow_total)
 
